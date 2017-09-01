@@ -87,10 +87,6 @@ class ChassisControlObject(DbusProperties, DbusObjectManager):
                                 dbus_interface="org.openbmc.Watchdog",
                                 signal_name="WatchdogError")
 
-        bus.add_signal_receiver(self.emergency_shutdown_signal_handler,
-                                dbus_interface="org.openbmc.SensorThresholds",
-                                signal_name="Emergency")
-
         bus.add_signal_receiver(self.SystemStateHandler,
                                 signal_name="GotoSystemState")
 
@@ -126,9 +122,9 @@ class ChassisControlObject(DbusProperties, DbusObjectManager):
                          in_signature='', out_signature='')
     def softPowerOff(self):
         print "Soft off power"
-        intf = self.getInterface('host_services')
-        ## host services will call power off when ready
-        intf.SoftPowerOff()
+        intf = self.getInterface('systemd')
+        f = getattr(intf, 'StartUnit')
+        f.call_async('obmc-host-shutdown@0.target', 'replace')
         return None
 
     @dbus.service.method(DBUS_NAME,
@@ -196,25 +192,6 @@ class ChassisControlObject(DbusProperties, DbusObjectManager):
     def host_watchdog_signal_handler(self):
         print "Watchdog Error, Going to quiesce"
         self.quiesce()
-
-    def emergency_shutdown_signal_handler(self, message):
-        print "Emergency Shutdown!"
-        # Log an event.
-        try:
-            # Exception happens or not, we need to power off.
-            obj = bus.get_object("org.openbmc.records.events",
-                                 "/org/openbmc/records/events",
-                                 introspect=False)
-            intf = dbus.Interface(obj, "org.openbmc.recordlog")
-            desc = message
-            sev = "critical error"
-            details = "Get emergency shutdown signal. Shutdown the host."
-            debug = dbus.ByteArray("")
-            intf.acceptBMCMessage(desc, sev, details, debug)
-        except Exception as e:
-            print "Emergency shutdown signal handler: log event error."
-            print e
-        self.powerOff()
 
 
 if __name__ == '__main__':
