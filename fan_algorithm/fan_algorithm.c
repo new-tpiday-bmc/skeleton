@@ -16,7 +16,7 @@
 #define I2C_CLIENT_PEC          0x04    /* Use Packet Error Checking */
 #define I2C_M_RECV_LEN          0x0400  /* length will be first received byte */
 
-#define MAX_PATH_LEN 70
+#define MAX_PATH_LEN 200
 #define MAX_SENSOR_NUM 40
 #define SAMPLING_N  20
 
@@ -93,6 +93,7 @@ static struct st_fan_obj_path_info g_CloseloopG3_ObjPath = {0};
 static struct st_fan_obj_path_info g_CloseloopG2_ObjPath = {0};
 static struct st_fan_obj_path_info g_AmbientObjPath = {0};
 static struct st_fan_obj_path_info g_FanSpeedObjPath = {0};
+static struct st_fan_obj_path_info g_SetFanSpeedObjPath = {0};
 static struct st_fan_obj_path_info g_FanModuleObjPath = {0};
 static struct st_fan_obj_path_info g_PowerObjPath = {0};
 static struct st_fan_obj_path_info *g_Closeloop_Header = NULL;
@@ -491,6 +492,22 @@ static int get_max_sensor_reading_Fan(sd_bus *bus, struct st_fan_obj_path_info *
 	return max_value;
 }
 
+static int set_sensor_value_Pwm(char *obj_path, int sensor_value)
+{
+	FILE *fPtr;
+	
+	if (obj_path == NULL)
+		return -1;
+	
+	fPtr = fopen(obj_path,"w");
+	if (fPtr == NULL)
+		return -1;
+	fprintf(fPtr, "%d", sensor_value);
+	fclose(fPtr);
+	return 0;
+}
+
+
 static void check_change_closeloop_params(struct st_closeloop_obj_data *sensor_data)
 {
 	int wait_times = 0;
@@ -730,28 +747,10 @@ static int fan_control_algorithm_monitor(void)
 				FinalFanSpeed = g_fan_para_shm->max_fanspeed;
 		}
 
-		for(i=0; i<g_FanSpeedObjPath.size; i++) {
-			if (i<3) {
-				ptr_temp_fan_bus = g_FanSpeedObjPath.service_bus;
-				ptr_temp_fan_intf = g_FanSpeedObjPath.service_inf;
-			} else {
-				ptr_temp_fan_bus = g_FanSpeedObjPath.ext_service_bus;
-				ptr_temp_fan_intf = g_FanSpeedObjPath.ext_service_inf;
-			}
-			rc = sd_bus_call_method(bus,
-						ptr_temp_fan_bus,
-						g_FanSpeedObjPath.path[i],			// Object path
-						"org.freedesktop.DBus.Properties",
-						"Set",
-						&bus_error,
-						&response,
-						"ssv",
-						ptr_temp_fan_intf, "Value", 
-						"x", FinalFanSpeed);
+		for(i=0; i<g_SetFanSpeedObjPath.size; i++) {
+			rc = set_sensor_value_Pwm(g_SetFanSpeedObjPath.path[i], FinalFanSpeed);
 			if(rc < 0)
-				fprintf(stderr, "Failed to adjust fan speed via dbus: %s, %d:%s\n", bus_error.message, i, g_FanSpeedObjPath.path[i]);
-			sd_bus_error_free(&bus_error);
-			response = sd_bus_message_unref(response);
+				fprintf(stderr, "Failed to adjust fan speed  %d:%s\n", i, g_FanSpeedObjPath.path[i]);
 		}
 
 		for(i=0; i<g_FanModuleObjPath.size; i++) {
@@ -877,6 +876,13 @@ static int initial_fan_config(sd_bus *bus)
 	if (reponse_len == 2) {
 		strcpy(g_FanSpeedObjPath.ext_service_bus , reponse_data[0]);
 		strcpy(g_FanSpeedObjPath.ext_service_inf , reponse_data[1]);
+	}
+
+
+	get_dbus_fan_parameters(bus, "SET_FAN_OUTPUT_OBJ", &reponse_len, reponse_data);
+	g_SetFanSpeedObjPath.size = reponse_len;
+	for (i = 0; i<reponse_len; i++) {
+		strcpy(g_SetFanSpeedObjPath.path[i], reponse_data[i]);
 	}
 
 	get_dbus_fan_parameters(bus, "OPEN_LOOP_PARAM", &reponse_len, reponse_data);

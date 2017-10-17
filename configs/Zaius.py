@@ -463,6 +463,15 @@ FAN_ALGORITHM_CONFIG = {
             "/xyz/openbmc_project/sensors/pwm/speed/fan4",
             "/xyz/openbmc_project/sensors/pwm/speed/fan5",
         ],
+    'SET_FAN_OUTPUT_OBJ':
+        [
+            "9-002e:pwm3",
+            "9-002e:pwm2",
+            "9-002e:pwm1",
+            "9-002d:pwm3",
+            "9-002d:pwm2",
+            "9-002d:pwm1",
+        ],
     'OPEN_LOOP_PARAM':[],
     'OPEN_LOOP_GROUPS_1':[],
     'CLOSE_LOOP_PARAM_1' :[],
