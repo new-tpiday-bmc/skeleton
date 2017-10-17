@@ -42,6 +42,9 @@ struct st_closeloop_obj_data {
 struct st_fan_obj_path_info {
 	char service_bus[MAX_PATH_LEN];
 	char service_inf[MAX_PATH_LEN];
+	char ext_service_bus[MAX_PATH_LEN]; //for pwm0~2 mapping xyz.openbmc_project.Hwmon.hwmon4 Bus
+	                                    //   pwm3~5 mapping xyz.openbmc_project.Hwmon.hwmon3 Bus
+	char ext_service_inf[MAX_PATH_LEN];
 	char path[MAX_SENSOR_NUM][MAX_PATH_LEN];
 	int size;
 	void *obj_data;
@@ -385,6 +388,41 @@ static int get_sensor_reading(sd_bus *bus, char *obj_path, int *sensor_reading, 
 	return rc;
 }
 
+static int get_sensor_reading_with_bus(sd_bus *bus, char *obj_path, int *sensor_reading, struct st_fan_obj_path_info *fan_obj, char *service_bus, char *service_inf)
+{
+	sd_bus_error bus_error = SD_BUS_ERROR_NULL;
+	sd_bus_message *response = NULL;
+	int rc;
+
+	*sensor_reading = 0;
+
+	if (service_bus == NULL || service_inf == NULL || strlen(service_bus) <= 0 || strlen(service_inf) <= 0 || strlen(obj_path) <= 0)
+		return -1;
+
+	rc = sd_bus_call_method(bus,
+				service_bus,
+				obj_path,
+				"org.freedesktop.DBus.Properties",
+				"Get",
+				&bus_error,
+				&response,
+				"ss",
+				service_inf, "Value");
+	
+	if(rc < 0) {
+		fprintf(stderr, "obj_path: %s Failed to get temperature from dbus: %s\n", obj_path, bus_error.message);
+	} else {
+		rc = sd_bus_message_read(response,"v", "x", sensor_reading);
+		if (rc < 0)
+			fprintf(stderr, "obj_path: %s Failed to parse response message:[%s]\n",obj_path, strerror(-rc));
+	}
+
+	sd_bus_error_free(&bus_error);
+	response = sd_bus_message_unref(response);
+
+	return rc;
+}
+
 static int get_max_sensor_reading(sd_bus *bus, struct st_fan_obj_path_info *fan_obj)
 {
 	int i;
@@ -518,6 +556,7 @@ static int fan_control_algorithm_monitor(void)
 	int closeloop_reading = 0, openloop_reading = 0;
 	int current_fanspeed = 0;
 	int first_time_set = 0;
+	char *ptr_temp_fan_bus = NULL, *ptr_temp_fan_intf= NULL;
 
 	do {
 		/* Connect to the user bus this time */
@@ -554,8 +593,23 @@ static int fan_control_algorithm_monitor(void)
 		response = sd_bus_message_unref(response);
 
 		if (Power_state == 1 ) {
+			current_fanspeed = 0;
+			for(i=0; i<g_FanSpeedObjPath.size; i++) {
+				int temp_fanspeed = 0;
+				if (i<3) {
+					ptr_temp_fan_bus = g_FanSpeedObjPath.service_bus;
+					ptr_temp_fan_intf = g_FanSpeedObjPath.service_inf;
+				} else {
+					ptr_temp_fan_bus = g_FanSpeedObjPath.ext_service_bus;
+					ptr_temp_fan_intf = g_FanSpeedObjPath.ext_service_inf;
+				}
 
-			current_fanspeed = get_max_sensor_reading(bus, &g_FanSpeedObjPath);
+				rc = get_sensor_reading_with_bus(bus, g_FanSpeedObjPath.path[i], &temp_fanspeed, &g_FanSpeedObjPath, ptr_temp_fan_bus, ptr_temp_fan_intf);
+				if (rc >= 0)
+				{
+					current_fanspeed = current_fanspeed < temp_fanspeed? temp_fanspeed: current_fanspeed;
+				}
+			}
 			g_fan_para_shm->current_speed = current_fanspeed;
 			if (current_fanspeed <0)
 				current_fanspeed = 0;
@@ -629,7 +683,14 @@ static int fan_control_algorithm_monitor(void)
 			int fan_in_index = 0;
 			int fan_mask = 0x0;
 			for(i=0, fan_in_index=0; fan_in_index<g_FanInputObjPath.size; i++, fan_in_index+=2) {
-				rc = get_sensor_reading(bus, g_FanInputObjPath.path[fan_in_index], &Fan_tach, &g_FanInputObjPath);
+				if (i<6) {
+					ptr_temp_fan_bus = g_FanInputObjPath.service_bus;
+					ptr_temp_fan_intf = g_FanInputObjPath.service_inf;
+				} else {
+					ptr_temp_fan_bus = g_FanInputObjPath.ext_service_bus;
+					ptr_temp_fan_intf = g_FanInputObjPath.ext_service_inf;
+				}
+				rc = get_sensor_reading_with_bus(bus, g_FanInputObjPath.path[fan_in_index], &Fan_tach, &g_FanInputObjPath, ptr_temp_fan_bus, ptr_temp_fan_intf);
 				if (rc < 0)
 					Fan_tach = 0;
 
@@ -670,17 +731,25 @@ static int fan_control_algorithm_monitor(void)
 		}
 
 		for(i=0; i<g_FanSpeedObjPath.size; i++) {
+			if (i<3) {
+				ptr_temp_fan_bus = g_FanSpeedObjPath.service_bus;
+				ptr_temp_fan_intf = g_FanSpeedObjPath.service_inf;
+			} else {
+				ptr_temp_fan_bus = g_FanSpeedObjPath.ext_service_bus;
+				ptr_temp_fan_intf = g_FanSpeedObjPath.ext_service_inf;
+			}
 			rc = sd_bus_call_method(bus,
-						g_FanSpeedObjPath.service_bus,
+						ptr_temp_fan_bus,
 						g_FanSpeedObjPath.path[i],			// Object path
-						g_FanSpeedObjPath.service_inf,
-						"setValue",
+						"org.freedesktop.DBus.Properties",
+						"Set",
 						&bus_error,
 						&response,
-						"i",
-						FinalFanSpeed);
+						"ssv",
+						ptr_temp_fan_intf, "Value", 
+						"x", FinalFanSpeed);
 			if(rc < 0)
-				fprintf(stderr, "Failed to adjust fan speed via dbus: %s\n", bus_error.message);
+				fprintf(stderr, "Failed to adjust fan speed via dbus: %s, %d:%s\n", bus_error.message, i, g_FanSpeedObjPath.path[i]);
 			sd_bus_error_free(&bus_error);
 			response = sd_bus_message_unref(response);
 		}
@@ -788,6 +857,11 @@ static int initial_fan_config(sd_bus *bus)
 		strcpy(g_FanInputObjPath.service_bus , reponse_data[0]);
 		strcpy(g_FanInputObjPath.service_inf , reponse_data[1]);
 	}
+	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#EXT_FAN_INPUT_OBJ", &reponse_len, reponse_data);
+	if (reponse_len == 2) {
+		strcpy(g_FanInputObjPath.ext_service_bus , reponse_data[0]);
+		strcpy(g_FanInputObjPath.ext_service_inf , reponse_data[1]);
+	}
 
 	get_dbus_fan_parameters(bus, "FAN_OUTPUT_OBJ", &reponse_len, reponse_data);
 	g_FanSpeedObjPath.size = reponse_len;
@@ -798,6 +872,11 @@ static int initial_fan_config(sd_bus *bus)
 	if (reponse_len == 2) {
 		strcpy(g_FanSpeedObjPath.service_bus , reponse_data[0]);
 		strcpy(g_FanSpeedObjPath.service_inf , reponse_data[1]);
+	}
+	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#EXT_FAN_OUTPUT_OBJ", &reponse_len, reponse_data);
+	if (reponse_len == 2) {
+		strcpy(g_FanSpeedObjPath.ext_service_bus , reponse_data[0]);
+		strcpy(g_FanSpeedObjPath.ext_service_inf , reponse_data[1]);
 	}
 
 	get_dbus_fan_parameters(bus, "OPEN_LOOP_PARAM", &reponse_len, reponse_data);
