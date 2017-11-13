@@ -433,9 +433,7 @@ FAN_ALGORITHM_CONFIG = {
         #fan3~5 and fan3L/H~fan5L/H  mapping xyz.openbmc_project.Hwmon.hwmon3 Bus
         'EXT_FAN_INPUT_OBJ' : ['xyz.openbmc_project.Hwmon.hwmon3', 'xyz.openbmc_project.Sensor.Value'],
         'EXT_FAN_OUTPUT_OBJ' : ['xyz.openbmc_project.Hwmon.hwmon3', 'xyz.openbmc_project.Sensor.Value'],
-        'OPEN_LOOP_GROUPS_1' : ['org.openbmc.Sensors', 'org.openbmc.SensorValue'],
-        'CLOSE_LOOP_GROUPS_1' : ['org.openbmc.Sensors', 'org.openbmc.SensorValue'],
-        'CLOSE_LOOP_GROUPS_2' : ['org.openbmc.Sensors', 'org.openbmc.SensorValue'],
+        'OPEN_LOOP_GROUPS_1' :  ['xyz.openbmc_project.Hwmon.hwmon0', 'xyz.openbmc_project.Sensor.Value'],
     },
 
     'CHASSIS_POWER_STATE': ['/org/openbmc/control/chassis0'],
@@ -472,8 +470,22 @@ FAN_ALGORITHM_CONFIG = {
             "9-002d:pwm2",
             "9-002d:pwm1",
         ],
-    'OPEN_LOOP_PARAM':[],
-    'OPEN_LOOP_GROUPS_1':[],
+#Open Loop Profile# Amb_inlet =System ambient + Ambient sensor Offset
+    'OPEN_LOOP_PARAM':
+        [
+            '0.23',
+            '-11.99',
+            '189.86',
+            '24',
+            '44',
+            '32',
+            '100',
+        ],
+    'OPEN_LOOP_GROUPS_1':
+        [
+            "/xyz/openbmc_project/sensors/temperature/ambient_mb",
+            #Thermal team only watch temp4 ambinet
+        ],
     'CLOSE_LOOP_PARAM_1' :[],
     'CLOSE_LOOP_GROUPS_1':[],
 

@@ -1203,7 +1203,7 @@ static void inital_fan_pid_shm()
 				g_fan_para_shm->closeloop_param[i].groups_sensor_reading[j] = 0;
 		}
 		g_fan_para_shm->closeloop_count = 0;
-		g_fan_para_shm->openloop_sensor_offset = 0;
+		g_fan_para_shm->openloop_sensor_offset = -2;
 		g_fan_para_shm->debug_msg_info_en = 0;
 	}
 }
