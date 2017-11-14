@@ -480,6 +480,8 @@ FAN_ALGORITHM_CONFIG = {
             '44',
             '32',
             '100',
+            '43', # Warning upper
+            '46', # Cirtical upper
         ],
     'OPEN_LOOP_GROUPS_1':
         [

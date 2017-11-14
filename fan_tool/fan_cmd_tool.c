@@ -15,6 +15,7 @@
 #define FAN_SHM_PATH "skeleton/fan_algorithm2"
 #define MAX_CLOSELOOP_SENSOR_NUM (8)
 #define MAX_CLOSELOOP_PROFILE_NUM (8)
+#define MAX_PATH_LEN 200
 
 
 struct st_fan_closeloop_par {
@@ -51,12 +52,17 @@ struct st_fan_parameter {
 	int openloop_speed;
 	double openloop_sensor_reading;
 	int openloop_sensor_offset;
+	int openloop_warning_upper;
+	int openloop_critical_upper;
+	char shutdown_msg[MAX_PATH_LEN];
 
 	int current_speed;
 	int max_fanspeed;
 	int min_fanspeed;
+	int current_power_state;
 	int debug_msg_info_en; //0:close fan alogrithm debug message; 1: open fan alogrithm debug message
 };
+
 
 
 
@@ -75,7 +81,7 @@ void usage(const char *prog)
 	       "\t\t\t -d : Kd\n"
 	       "\t\t\t -t : target value\n"
 	       "\t\t\t -n : sample number (1~100)\n"
-	       "\t\t\t -e : select closeloop index(0:GPU;1:PEX9797)\n"
+	       "\t\t\t -e : select closeloop index\n"
 	       "\t\t openloop parameters setting:\n"
 	       "\t\t\t -a : ParamA\n"
 	       "\t\t\t -b : ParamB\n"
@@ -85,6 +91,8 @@ void usage(const char *prog)
 	       "\t\t\t -L : LowSpeed\n"
 	       "\t\t\t -U : HighSpeed\n"
 	       "\t\t\t -o : Offset\n"
+	       "\t\t\t -W : Warning Upper\n"
+	       "\t\t\t -C : Critical Upper\n"
 	       "\t\t pwm parameters setting:\n"
 	       "\t\t\t -s : set max fan speed\n"
 	       "\t\t\t -m : set min fan speed\n"
@@ -179,8 +187,10 @@ main(int argc, char * const argv[])
 	fan_p.max_fanspeed = UNKNOW_VALUE;
 	fan_p.min_fanspeed = UNKNOW_VALUE;
 	fan_p.debug_msg_info_en = UNKNOW_VALUE;
+	fan_p.openloop_warning_upper = UNKNOW_VALUE;
+	fan_p.openloop_critical_upper = UNKNOW_VALUE;
 
-	while ((opt = getopt(argc, argv, "hwrp:i:d:t:a:b:c:l:u:s:m:n:e:o:g:L:U:T:")) != -1) {
+	while ((opt = getopt(argc, argv, "hwrp:i:d:t:a:b:c:l:u:s:m:n:e:o:g:L:U:T:W:C:")) != -1) {
 		switch (opt) {
 		case 'h':
 			usage(argv[0]);
@@ -249,6 +259,12 @@ main(int argc, char * const argv[])
 		case 'T':
 			timedelay =  atoi(optarg);
 			break;
+		case 'W':
+			fan_p.openloop_warning_upper =  atoi(optarg);
+			break;
+		case 'C':
+			fan_p.openloop_critical_upper =  atoi(optarg);
+			break;
 		default:
 			usage(argv[0]);
 			return -1;
@@ -272,12 +288,23 @@ main(int argc, char * const argv[])
 
 	closeloop = &(g_fan_para_shm->closeloop_param[closeloop_index]);
 
+	
 
 	if (flag_wr == 0) {
 	do {
+
+		if (g_fan_para_shm->current_power_state == 1) {
+			print_datetime();
+			printf("Current System Power On =============\n");
+		} else if (g_fan_para_shm->current_power_state == 0) {
+			print_datetime();
+			printf("Current System AUX (Power Off) =============\n");
+		}
+		
 		for (i = 0 ; i<g_fan_para_shm->closeloop_count; i++)
 		{
 			closeloop = &(g_fan_para_shm->closeloop_param[i]);
+			print_datetime();
 			printf("Closeloop Info %d, sensor_reading,%d, kp,%f, Ki,%f, Kd,%f, target,%d, pid_value,%f, closeloop speed,%f, current fan speed,%f , total_error,%d, current_error,%d , last_error:%d \n",
 					i, closeloop->closeloop_sensor_reading, closeloop->Kp, closeloop->Ki, closeloop->Kd,closeloop->sensor_tracking,
 					closeloop->pid_value, closeloop->closeloop_speed,
@@ -289,7 +316,12 @@ main(int argc, char * const argv[])
 		       g_fan_para_shm->openloop_sensor_reading, g_fan_para_shm->openloop_sensor_offset,
 		       g_fan_para_shm->g_ParamA, g_fan_para_shm->g_ParamB, g_fan_para_shm->g_ParamC,
 		       g_fan_para_shm->g_LowAmb, g_fan_para_shm->g_UpAmb,  g_fan_para_shm->g_LowSpeed, g_fan_para_shm->g_HighSpeed,
-		       g_fan_para_shm->openloop_speed);
+		       g_fan_para_shm->openloop_speed, g_fan_para_shm->openloop_warning_upper, g_fan_para_shm->openloop_critical_upper);
+
+		if (strlen(g_fan_para_shm->shutdown_msg) > 0) {
+			print_datetime();
+			printf("Openloop Info, trigger shutdown message:%s\n", g_fan_para_shm->shutdown_msg);
+		}
 
 		print_datetime();
 		printf("PWM Info, current fan speed,%d (%d~%d)\n",
@@ -327,7 +359,8 @@ main(int argc, char * const argv[])
 			g_fan_para_shm->flag_closeloop = 2; //fan closeloop parameter changed
 		}
 
-		if (fan_p.g_ParamA!=UNKNOW_VALUE || fan_p.g_ParamB!=UNKNOW_VALUE || fan_p.g_ParamC!=UNKNOW_VALUE || fan_p.g_LowAmb!=UNKNOW_VALUE || fan_p.g_UpAmb!=UNKNOW_VALUE || fan_p.openloop_sensor_offset!=UNKNOW_VALUE ||  fan_p.g_LowSpeed!=UNKNOW_VALUE || fan_p.g_HighSpeed!=UNKNOW_VALUE) {
+		if (fan_p.g_ParamA!=UNKNOW_VALUE || fan_p.g_ParamB!=UNKNOW_VALUE || fan_p.g_ParamC!=UNKNOW_VALUE || fan_p.g_LowAmb!=UNKNOW_VALUE || fan_p.g_UpAmb!=UNKNOW_VALUE || fan_p.openloop_sensor_offset!=UNKNOW_VALUE ||  fan_p.g_LowSpeed!=UNKNOW_VALUE || fan_p.g_HighSpeed!=UNKNOW_VALUE || \
+			fan_p.openloop_warning_upper!=UNKNOW_VALUE || fan_p.openloop_critical_upper!=UNKNOW_VALUE) {
 			g_fan_para_shm->flag_openloop = 3; //block wait
 
 			if (fan_p.g_ParamA != UNKNOW_VALUE) {
@@ -361,6 +394,14 @@ main(int argc, char * const argv[])
 			if (fan_p.g_HighSpeed!=UNKNOW_VALUE) {
 				printf("[Openloop]g_HighSpeed changed: %d --> %d\n", g_fan_para_shm->g_HighSpeed, fan_p.g_HighSpeed);
 				g_fan_para_shm->g_HighSpeed = fan_p.g_HighSpeed;
+			}
+			if (fan_p.openloop_warning_upper!=UNKNOW_VALUE) {
+				printf("[Openloop]openloop_warning_upper changed: %d --> %d\n", g_fan_para_shm->openloop_warning_upper, fan_p.openloop_warning_upper);
+				g_fan_para_shm->openloop_warning_upper = fan_p.openloop_warning_upper;
+			}
+			if (fan_p.openloop_critical_upper!=UNKNOW_VALUE) {
+				printf("[Openloop]openloop_critical_upper changed: %d --> %d\n", g_fan_para_shm->openloop_critical_upper, fan_p.openloop_critical_upper);
+				g_fan_para_shm->openloop_critical_upper = fan_p.openloop_critical_upper;
 			}
 
 			g_fan_para_shm->flag_openloop = 2; //fan openloop parameter changed

@@ -92,10 +92,14 @@ struct st_fan_parameter {
 	int openloop_speed;
 	double openloop_sensor_reading;
 	int openloop_sensor_offset;
+	int openloop_warning_upper;
+	int openloop_critical_upper;
+	char shutdown_msg[MAX_PATH_LEN];
 
 	int current_speed;
 	int max_fanspeed;
 	int min_fanspeed;
+	int current_power_state;
 	int debug_msg_info_en; //0:close fan alogrithm debug message; 1: open fan alogrithm debug message
 };
 
@@ -137,6 +141,10 @@ static int g_LowAmb = 0;
 static int g_UpAmb = 0;
 static int g_LowSpeed = 0;
 static int g_HighSpeed = 0;
+static int g_Openloop_Warning_Upper = 0;
+static int g_Openloop_Critical_Upper = 0;
+
+
 
 //Fan LED command & register mask
 static int FAN_LED_OFF   =  0;
@@ -206,6 +214,19 @@ static int i2c_open(int bus)
 		return -1;
 	}
 	return fd;
+}
+
+static void system_shut_down(char *message) {
+	char msg[MAX_PATH_LEN] = {0};
+	if (message != NULL)
+		sprintf(msg, "[FAN_ALGORITHM][%s] trigger system shut down: %s", __FUNCTION__, message);
+	else
+		sprintf(msg, "[FAN_ALGORITHM][%s] trigger system shut down", __FUNCTION__);
+	printf("%s\n", msg);
+
+	strncpy(g_fan_para_shm->shutdown_msg, msg, MAX_PATH_LEN);
+
+	system("obmcutil  poweroff");
 }
 
 
@@ -391,12 +412,24 @@ static int calculate_openloop (double sensorreading)
 	int speed = 0;
 
 	if (sensorreading<=0) {
-		g_Openloopspeed = 0;
-		return 0;
+		g_Openloopspeed = 100; // As inlet temperature is not available, set fan speed to 100% and warn
+		g_fan_para_shm->openloop_speed = 100;
+		return 1;
 	}
 
 	sensorreading=sensorreading+g_fan_para_shm->openloop_sensor_offset;
 
+	if (sensorreading > g_Openloop_Critical_Upper) {
+		char msg[100] = {0};
+		sprintf(msg, "%s : sensorreading=%f, g_Openloop_Critical_Upper:%d", __FUNCTION__, sensorreading, g_Openloop_Critical_Upper);
+		system_shut_down(msg);
+		g_Openloopspeed = 100; // as openloop reading > warning upper, then Fan Speed 100%
+		return 1;
+	} else if (sensorreading > g_Openloop_Warning_Upper) {
+		g_Openloopspeed = 100; // as openloop reading > warning upper, then Fan Speed 100%
+		g_fan_para_shm->openloop_speed = 100;
+		return 1;
+	}
 
 	if (sensorreading > g_UpAmb) {
 		speed = g_HighSpeed;
@@ -629,6 +662,8 @@ static void check_change_openloop_params()
 		g_UpAmb = g_fan_para_shm->g_UpAmb;
 		g_LowSpeed = g_fan_para_shm->g_LowSpeed;
 		g_HighSpeed = g_fan_para_shm->g_HighSpeed;
+		g_Openloop_Warning_Upper = g_fan_para_shm->openloop_warning_upper;
+		g_Openloop_Critical_Upper = g_fan_para_shm->openloop_critical_upper;
 	}
 }
 
@@ -648,6 +683,7 @@ static int fan_control_algorithm_monitor(void)
 	int current_fanspeed = 0;
 	int first_time_set = 0;
 	char *ptr_temp_fan_bus = NULL, *ptr_temp_fan_intf= NULL;
+	int prev_power_status = -1;
 
 	double real_fanspeed = 0.0;
 	do {
@@ -683,6 +719,16 @@ static int fan_control_algorithm_monitor(void)
 		}
 		sd_bus_error_free(&bus_error);
 		response = sd_bus_message_unref(response);
+
+		g_fan_para_shm->current_power_state = Power_state;
+		if (prev_power_status < 0)
+			prev_power_status = Power_state;
+
+		if (prev_power_status != Power_state) {
+			if (Power_state == 1)
+				g_fan_para_shm->shutdown_msg[0] = 0; //clear shudown message
+			prev_power_status = Power_state;
+		}
 
 		current_fanspeed = 0;
 		for(i=0; i<g_FanSpeedObjPath.size; i++) {
@@ -920,14 +966,14 @@ finish:
 	return rc < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
-static int get_dbus_fan_parameters(sd_bus *bus , char *request_param , int *reponse_len, char reponse_data[50][200])
+static int get_dbus_fan_parameters(sd_bus *bus , char *request_param , int *response_len, char response_data[50][200])
 {
 	sd_bus_error bus_error = SD_BUS_ERROR_NULL;
 	sd_bus_message *response = NULL;
 	int rc = 0;
 	const char*  response_param;
 
-	*reponse_len = 0; //clear reponse_len
+	*response_len = 0; //clear response_len
 
 	rc = sd_bus_call_method(bus,
 				"org.openbmc.managers.System",
@@ -953,9 +999,9 @@ static int get_dbus_fan_parameters(sd_bus *bus , char *request_param , int *repo
 				if (stard_idx < end_idx) {
 					str_len = end_idx - stard_idx;
 					if (str_len < MAX_PATH_LEN) {
-						memcpy(reponse_data[*reponse_len], response_param+stard_idx, str_len);
-						reponse_data[*reponse_len][str_len] = '\0';
-						*reponse_len=*reponse_len+1;
+						memcpy(response_data[*response_len], response_param+stard_idx, str_len);
+						response_data[*response_len][str_len] = '\0';
+						*response_len=*response_len+1;
 					} else
 						printf("Error:%s[%d], parse string exceds length:%d, str_len:%d\n", __FUNCTION__, __LINE__, MAX_PATH_LEN, str_len);
 				}
@@ -971,60 +1017,62 @@ static int get_dbus_fan_parameters(sd_bus *bus , char *request_param , int *repo
 
 static int initial_fan_config(sd_bus *bus)
 {
-	int reponse_len = 0;
-	char reponse_data[50][200];
+	int response_len = 0;
+	char response_data[50][200];
 	int i;
 	int obj_count = 0;
 	char *p;
 	int index;
 
-	get_dbus_fan_parameters(bus, "FAN_INPUT_OBJ", &reponse_len, reponse_data);
-	g_FanInputObjPath.size = reponse_len;
-	for (i = 0; i<reponse_len; i+=2) {
-		strcpy(g_FanInputObjPath.path[i], reponse_data[i]);
+	get_dbus_fan_parameters(bus, "FAN_INPUT_OBJ", &response_len, response_data);
+	g_FanInputObjPath.size = response_len;
+	for (i = 0; i<response_len; i+=2) {
+		strcpy(g_FanInputObjPath.path[i], response_data[i]);
 	}
-	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#FAN_INPUT_OBJ", &reponse_len, reponse_data);
-	if (reponse_len == 2) {
-		strcpy(g_FanInputObjPath.service_bus , reponse_data[0]);
-		strcpy(g_FanInputObjPath.service_inf , reponse_data[1]);
+	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#FAN_INPUT_OBJ", &response_len, response_data);
+	if (response_len == 2) {
+		strcpy(g_FanInputObjPath.service_bus , response_data[0]);
+		strcpy(g_FanInputObjPath.service_inf , response_data[1]);
 	}
-	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#EXT_FAN_INPUT_OBJ", &reponse_len, reponse_data);
-	if (reponse_len == 2) {
-		strcpy(g_FanInputObjPath.ext_service_bus , reponse_data[0]);
-		strcpy(g_FanInputObjPath.ext_service_inf , reponse_data[1]);
-	}
-
-	get_dbus_fan_parameters(bus, "FAN_OUTPUT_OBJ", &reponse_len, reponse_data);
-	g_FanSpeedObjPath.size = reponse_len;
-	for (i = 0; i<reponse_len; i++) {
-		strcpy(g_FanSpeedObjPath.path[i], reponse_data[i]);
-	}
-	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#FAN_OUTPUT_OBJ", &reponse_len, reponse_data);
-	if (reponse_len == 2) {
-		strcpy(g_FanSpeedObjPath.service_bus , reponse_data[0]);
-		strcpy(g_FanSpeedObjPath.service_inf , reponse_data[1]);
-	}
-	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#EXT_FAN_OUTPUT_OBJ", &reponse_len, reponse_data);
-	if (reponse_len == 2) {
-		strcpy(g_FanSpeedObjPath.ext_service_bus , reponse_data[0]);
-		strcpy(g_FanSpeedObjPath.ext_service_inf , reponse_data[1]);
+	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#EXT_FAN_INPUT_OBJ", &response_len, response_data);
+	if (response_len == 2) {
+		strcpy(g_FanInputObjPath.ext_service_bus , response_data[0]);
+		strcpy(g_FanInputObjPath.ext_service_inf , response_data[1]);
 	}
 
-
-	get_dbus_fan_parameters(bus, "SET_FAN_OUTPUT_OBJ", &reponse_len, reponse_data);
-	g_SetFanSpeedObjPath.size = reponse_len;
-	for (i = 0; i<reponse_len; i++) {
-		strcpy(g_SetFanSpeedObjPath.path[i], reponse_data[i]);
+	get_dbus_fan_parameters(bus, "FAN_OUTPUT_OBJ", &response_len, response_data);
+	g_FanSpeedObjPath.size = response_len;
+	for (i = 0; i<response_len; i++) {
+		strcpy(g_FanSpeedObjPath.path[i], response_data[i]);
+	}
+	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#FAN_OUTPUT_OBJ", &response_len, response_data);
+	if (response_len == 2) {
+		strcpy(g_FanSpeedObjPath.service_bus , response_data[0]);
+		strcpy(g_FanSpeedObjPath.service_inf , response_data[1]);
+	}
+	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#EXT_FAN_OUTPUT_OBJ", &response_len, response_data);
+	if (response_len == 2) {
+		strcpy(g_FanSpeedObjPath.ext_service_bus , response_data[0]);
+		strcpy(g_FanSpeedObjPath.ext_service_inf , response_data[1]);
 	}
 
-	get_dbus_fan_parameters(bus, "OPEN_LOOP_PARAM", &reponse_len, reponse_data);
-	g_ParamA = atof(reponse_data[0]);
-	g_ParamB = atof(reponse_data[1]);
-	g_ParamC = atof(reponse_data[2]);
-	g_LowAmb = atoi(reponse_data[3]);
-	g_UpAmb = atoi(reponse_data[4]);
-	g_LowSpeed = atoi(reponse_data[5]);
-	g_HighSpeed = atoi(reponse_data[6]);
+
+	get_dbus_fan_parameters(bus, "SET_FAN_OUTPUT_OBJ", &response_len, response_data);
+	g_SetFanSpeedObjPath.size = response_len;
+	for (i = 0; i<response_len; i++) {
+		strcpy(g_SetFanSpeedObjPath.path[i], response_data[i]);
+	}
+
+	get_dbus_fan_parameters(bus, "OPEN_LOOP_PARAM", &response_len, response_data);
+	g_ParamA = atof(response_data[0]);
+	g_ParamB = atof(response_data[1]);
+	g_ParamC = atof(response_data[2]);
+	g_LowAmb = atoi(response_data[3]);
+	g_UpAmb = atoi(response_data[4]);
+	g_LowSpeed = atoi(response_data[5]);
+	g_HighSpeed = atoi(response_data[6]);
+	g_Openloop_Warning_Upper = atoi(response_data[7]);
+	g_Openloop_Critical_Upper = atoi(response_data[8]);
 
 	g_fan_para_shm->g_ParamA= g_ParamA;
 	g_fan_para_shm->g_ParamB= g_ParamB;
@@ -1034,6 +1082,8 @@ static int initial_fan_config(sd_bus *bus)
 	g_fan_para_shm->g_LowSpeed= g_LowSpeed;
 	g_fan_para_shm->g_HighSpeed= g_HighSpeed;
 	g_fan_para_shm->flag_openloop= 1;
+	g_fan_para_shm->openloop_warning_upper = g_Openloop_Warning_Upper;
+	g_fan_para_shm->openloop_critical_upper = g_Openloop_Critical_Upper;
 
 
 	obj_count = 1;
@@ -1044,22 +1094,22 @@ static int initial_fan_config(sd_bus *bus)
 
 		prefix_closeloop[0] = 0;
 		sprintf(prefix_closeloop, "CLOSE_LOOP_GROUPS_%d", obj_count);
-		get_dbus_fan_parameters(bus, prefix_closeloop, &reponse_len, reponse_data);
-		if (reponse_len <= 2)
+		get_dbus_fan_parameters(bus, prefix_closeloop, &response_len, response_data);
+		if (response_len <= 2)
 			break;
 
 		t_fan_obj =(struct st_fan_obj_path_info *) malloc(sizeof(struct st_fan_obj_path_info));
 
-		t_fan_obj->size = reponse_len;
-		for (i = 0; i<reponse_len ; i++)
-			strcpy(t_fan_obj->path[i], reponse_data[i]);
+		t_fan_obj->size = response_len;
+		for (i = 0; i<response_len ; i++)
+			strcpy(t_fan_obj->path[i], response_data[i]);
 
 		prefix_closeloop[0] = 0;
 		sprintf(prefix_closeloop, "FAN_DBUS_INTF_LOOKUP#CLOSE_LOOP_GROUPS_%d", obj_count);
-		get_dbus_fan_parameters(bus, prefix_closeloop, &reponse_len, reponse_data);
-		if (reponse_len == 2) {
-			strcpy(t_fan_obj->service_bus , reponse_data[0]);
-			strcpy(t_fan_obj->service_inf , reponse_data[1]);
+		get_dbus_fan_parameters(bus, prefix_closeloop, &response_len, response_data);
+		if (response_len == 2) {
+			strcpy(t_fan_obj->service_bus , response_data[0]);
+			strcpy(t_fan_obj->service_inf , response_data[1]);
 		} else {
 			free(t_fan_obj);
 			break;
@@ -1067,16 +1117,16 @@ static int initial_fan_config(sd_bus *bus)
 
 		prefix_closeloop[0] = 0;
 		sprintf(prefix_closeloop, "CLOSE_LOOP_PARAM_%d", obj_count);
-		get_dbus_fan_parameters(bus, prefix_closeloop, &reponse_len, reponse_data);
-		if (reponse_len > 0) {
+		get_dbus_fan_parameters(bus, prefix_closeloop, &response_len, response_data);
+		if (response_len > 0) {
 			t_closeloop_data = (struct st_closeloop_obj_data *) malloc(sizeof(struct st_closeloop_obj_data));
 			index = obj_count -1;
 			t_closeloop_data->index = index;
-			t_closeloop_data->Kp = (double)atof(reponse_data[0]);
-			t_closeloop_data->Ki = (double)atof(reponse_data[1]);
-			t_closeloop_data->Kd = (double)atof(reponse_data[2]);
-			t_closeloop_data->sensor_tracking = atoi(reponse_data[3]);
-			t_closeloop_data->warning_temp = atoi(reponse_data[4]);
+			t_closeloop_data->Kp = (double)atof(response_data[0]);
+			t_closeloop_data->Ki = (double)atof(response_data[1]);
+			t_closeloop_data->Kd = (double)atof(response_data[2]);
+			t_closeloop_data->sensor_tracking = atoi(response_data[3]);
+			t_closeloop_data->warning_temp = atoi(response_data[4]);
 
 			g_fan_para_shm->closeloop_param[index].Kp = t_closeloop_data->Kp;
 			g_fan_para_shm->closeloop_param[index].Ki = t_closeloop_data->Ki;
@@ -1105,22 +1155,22 @@ static int initial_fan_config(sd_bus *bus)
 
 		prefix_openloop[0] = 0;
 		sprintf(prefix_openloop, "OPEN_LOOP_GROUPS_%d", obj_count);
-		get_dbus_fan_parameters(bus, prefix_openloop, &reponse_len, reponse_data);
-		if (reponse_len == 0)
+		get_dbus_fan_parameters(bus, prefix_openloop, &response_len, response_data);
+		if (response_len == 0)
 			break;
 
 		t_fan_obj =(struct st_fan_obj_path_info *) malloc(sizeof(struct st_fan_obj_path_info));
 
-		t_fan_obj->size = reponse_len;
-		for (i = 0; i<reponse_len ; i++)
-			strcpy(t_fan_obj->path[i], reponse_data[i]);
+		t_fan_obj->size = response_len;
+		for (i = 0; i<response_len ; i++)
+			strcpy(t_fan_obj->path[i], response_data[i]);
 
 		prefix_openloop[0] = 0;
 		sprintf(prefix_openloop, "FAN_DBUS_INTF_LOOKUP#OPEN_LOOP_GROUPS_%d", obj_count);
-		get_dbus_fan_parameters(bus, prefix_openloop, &reponse_len, reponse_data);
-		if (reponse_len == 2) {
-			strcpy(t_fan_obj->service_bus , reponse_data[0]);
-			strcpy(t_fan_obj->service_inf , reponse_data[1]);
+		get_dbus_fan_parameters(bus, prefix_openloop, &response_len, response_data);
+		if (response_len == 2) {
+			strcpy(t_fan_obj->service_bus , response_data[0]);
+			strcpy(t_fan_obj->service_inf , response_data[1]);
 		} else {
 			free(t_fan_obj);
 			break;
@@ -1131,62 +1181,62 @@ static int initial_fan_config(sd_bus *bus)
 		obj_count++;
 	}
 
-	get_dbus_fan_parameters(bus, "FAN_LED_OFF", &reponse_len, reponse_data);
-	FAN_LED_OFF = reponse_len > 0? strtoul(reponse_data[0], &p, 16): FAN_LED_OFF;
+	get_dbus_fan_parameters(bus, "FAN_LED_OFF", &response_len, response_data);
+	FAN_LED_OFF = response_len > 0? strtoul(response_data[0], &p, 16): FAN_LED_OFF;
 
-	get_dbus_fan_parameters(bus, "FAN_LED_PORT0_ALL_BLUE", &reponse_len, reponse_data);
-	FAN_LED_PORT0_ALL_BLUE = reponse_len > 0? strtoul(reponse_data[0], &p, 16): FAN_LED_PORT0_ALL_BLUE;
+	get_dbus_fan_parameters(bus, "FAN_LED_PORT0_ALL_BLUE", &response_len, response_data);
+	FAN_LED_PORT0_ALL_BLUE = response_len > 0? strtoul(response_data[0], &p, 16): FAN_LED_PORT0_ALL_BLUE;
 
-	get_dbus_fan_parameters(bus, "FAN_LED_PORT1_ALL_BLUE", &reponse_len, reponse_data);
-	FAN_LED_PORT1_ALL_BLUE = reponse_len > 0? strtoul(reponse_data[0], &p, 16): FAN_LED_PORT1_ALL_BLUE;
+	get_dbus_fan_parameters(bus, "FAN_LED_PORT1_ALL_BLUE", &response_len, response_data);
+	FAN_LED_PORT1_ALL_BLUE = response_len > 0? strtoul(response_data[0], &p, 16): FAN_LED_PORT1_ALL_BLUE;
 
-	get_dbus_fan_parameters(bus, "FAN_LED_PORT0_ALL_RED", &reponse_len, reponse_data);
-	FAN_LED_PORT0_ALL_RED = reponse_len > 0? strtoul(reponse_data[0], &p, 16): FAN_LED_PORT0_ALL_RED;
+	get_dbus_fan_parameters(bus, "FAN_LED_PORT0_ALL_RED", &response_len, response_data);
+	FAN_LED_PORT0_ALL_RED = response_len > 0? strtoul(response_data[0], &p, 16): FAN_LED_PORT0_ALL_RED;
 
-	get_dbus_fan_parameters(bus, "FAN_LED_PORT1_ALL_RED", &reponse_len, reponse_data);
-	FAN_LED_PORT1_ALL_RED = reponse_len > 0? strtoul(reponse_data[0], &p, 16): FAN_LED_PORT1_ALL_RED;
+	get_dbus_fan_parameters(bus, "FAN_LED_PORT1_ALL_RED", &response_len, response_data);
+	FAN_LED_PORT1_ALL_RED = response_len > 0? strtoul(response_data[0], &p, 16): FAN_LED_PORT1_ALL_RED;
 
-	get_dbus_fan_parameters(bus, "PORT0_FAN_LED_RED_MASK", &reponse_len, reponse_data);
-	PORT0_FAN_LED_RED_MASK = reponse_len > 0? strtoul(reponse_data[0], &p, 16): PORT0_FAN_LED_RED_MASK;
+	get_dbus_fan_parameters(bus, "PORT0_FAN_LED_RED_MASK", &response_len, response_data);
+	PORT0_FAN_LED_RED_MASK = response_len > 0? strtoul(response_data[0], &p, 16): PORT0_FAN_LED_RED_MASK;
 
-	get_dbus_fan_parameters(bus, "PORT0_FAN_LED_BLUE_MASK", &reponse_len, reponse_data);
-	PORT0_FAN_LED_BLUE_MASK = reponse_len > 0? strtoul(reponse_data[0], &p, 16): PORT0_FAN_LED_BLUE_MASK;
+	get_dbus_fan_parameters(bus, "PORT0_FAN_LED_BLUE_MASK", &response_len, response_data);
+	PORT0_FAN_LED_BLUE_MASK = response_len > 0? strtoul(response_data[0], &p, 16): PORT0_FAN_LED_BLUE_MASK;
 
-	get_dbus_fan_parameters(bus, "PORT1_FAN_LED_RED_MASK", &reponse_len, reponse_data);
-	PORT1_FAN_LED_RED_MASK = reponse_len > 0? strtoul(reponse_data[0], &p, 16): PORT1_FAN_LED_RED_MASK;
+	get_dbus_fan_parameters(bus, "PORT1_FAN_LED_RED_MASK", &response_len, response_data);
+	PORT1_FAN_LED_RED_MASK = response_len > 0? strtoul(response_data[0], &p, 16): PORT1_FAN_LED_RED_MASK;
 
-	get_dbus_fan_parameters(bus, "PORT1_FAN_LED_BLUE_MASK", &reponse_len, reponse_data);
-	PORT1_FAN_LED_BLUE_MASK = reponse_len > 0? strtoul(reponse_data[0], &p, 16): PORT1_FAN_LED_BLUE_MASK;
+	get_dbus_fan_parameters(bus, "PORT1_FAN_LED_BLUE_MASK", &response_len, response_data);
+	PORT1_FAN_LED_BLUE_MASK = response_len > 0? strtoul(response_data[0], &p, 16): PORT1_FAN_LED_BLUE_MASK;
 
-	get_dbus_fan_parameters(bus, "FAN_LED_SPEED_LIMIT", &reponse_len, reponse_data);
-	g_fanled_speed_limit = reponse_len > 0? atoi(reponse_data[0]): g_fanled_speed_limit;
+	get_dbus_fan_parameters(bus, "FAN_LED_SPEED_LIMIT", &response_len, response_data);
+	g_fanled_speed_limit = response_len > 0? atoi(response_data[0]): g_fanled_speed_limit;
 
-	get_dbus_fan_parameters(bus, "FAN_LED_AUX_SPEED_LIMIT", &reponse_len, reponse_data);
-	g_fanled_aux_speed_limit = reponse_len > 0? atoi(reponse_data[0]): g_fanled_speed_limit;
+	get_dbus_fan_parameters(bus, "FAN_LED_AUX_SPEED_LIMIT", &response_len, response_data);
+	g_fanled_aux_speed_limit = response_len > 0? atoi(response_data[0]): g_fanled_speed_limit;
 
-	get_dbus_fan_parameters(bus, "FAN_LED_I2C_BUS", &reponse_len, reponse_data);
-	if (reponse_len > 0)
-		strcpy(g_FanLed_I2CBus, reponse_data[0]);
+	get_dbus_fan_parameters(bus, "FAN_LED_I2C_BUS", &response_len, response_data);
+	if (response_len > 0)
+		strcpy(g_FanLed_I2CBus, response_data[0]);
 
-	get_dbus_fan_parameters(bus, "FAN_LED_I2C_SLAVE_ADDRESS", &reponse_len, reponse_data);
-	g_FanLed_SlaveAddr = reponse_len > 0? strtoul(reponse_data[0], &p, 16): g_FanLed_SlaveAddr;
+	get_dbus_fan_parameters(bus, "FAN_LED_I2C_SLAVE_ADDRESS", &response_len, response_data);
+	g_FanLed_SlaveAddr = response_len > 0? strtoul(response_data[0], &p, 16): g_FanLed_SlaveAddr;
 
 	//Refere to FRU_INSTANCES in config/.py file to search inventory item object path with keywords: 'fan'
-	get_dbus_fan_parameters(bus, "INVENTORY_FAN", &reponse_len, reponse_data);
-	g_FanModuleObjPath.size = reponse_len;
-	for (i = 0; i<reponse_len; i++) {
-		strcpy(g_FanModuleObjPath.path[i], reponse_data[i]);
+	get_dbus_fan_parameters(bus, "INVENTORY_FAN", &response_len, response_data);
+	g_FanModuleObjPath.size = response_len;
+	for (i = 0; i<response_len; i++) {
+		strcpy(g_FanModuleObjPath.path[i], response_data[i]);
 	}
 
-	get_dbus_fan_parameters(bus, "CHASSIS_POWER_STATE", &reponse_len, reponse_data);
-	if (reponse_len > 0) {
-		strcpy(g_PowerObjPath.path[0], reponse_data[0]);
+	get_dbus_fan_parameters(bus, "CHASSIS_POWER_STATE", &response_len, response_data);
+	if (response_len > 0) {
+		strcpy(g_PowerObjPath.path[0], response_data[0]);
 		g_PowerObjPath.size = 1;
 	}
-	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#CHASSIS_POWER_STATE", &reponse_len, reponse_data);
-	if (reponse_len == 2) {
-		strcpy(g_PowerObjPath.service_bus , reponse_data[0]);
-		strcpy(g_PowerObjPath.service_inf , reponse_data[1]);
+	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#CHASSIS_POWER_STATE", &response_len, response_data);
+	if (response_len == 2) {
+		strcpy(g_PowerObjPath.service_bus , response_data[0]);
+		strcpy(g_PowerObjPath.service_inf , response_data[1]);
 	}
 }
 
@@ -1221,6 +1271,10 @@ static void inital_fan_pid_shm()
 		g_fan_para_shm->closeloop_count = 0;
 		g_fan_para_shm->openloop_sensor_offset = -2;
 		g_fan_para_shm->debug_msg_info_en = 0;
+		g_fan_para_shm->current_power_state = -1;
+		g_fan_para_shm->openloop_warning_upper = MAX_SENSOR_READING;
+		g_fan_para_shm->openloop_critical_upper = MAX_SENSOR_READING;
+		g_fan_para_shm->shutdown_msg[0] = 0;
 	}
 }
 
