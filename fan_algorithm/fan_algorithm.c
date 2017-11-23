@@ -11,8 +11,6 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 
-
-
 #define I2C_CLIENT_PEC          0x04    /* Use Packet Error Checking */
 #define I2C_M_RECV_LEN          0x0400  /* length will be first received byte */
 
@@ -42,6 +40,7 @@ struct st_closeloop_obj_data {
 	double Kp;
 	double Ki;
 	double Kd;
+	int critical_temp;
 };
 
 struct st_fan_obj_path_info {
@@ -95,7 +94,6 @@ struct st_fan_parameter {
 	int openloop_sensor_offset;
 	int openloop_warning_upper;
 	int openloop_critical_upper;
-	char shutdown_msg[MAX_PATH_LEN];
 
 	int current_speed;
 	int max_fanspeed;
@@ -104,6 +102,10 @@ struct st_fan_parameter {
 	int debug_msg_info_en; //0:close fan alogrithm debug message; 1: open fan alogrithm debug message
 };
 
+enum FAN_ALGO_TYPE {
+	EM_CLOSELOOP = 0,
+	EM_OPENLOOP
+};
 
 
 static struct st_fan_obj_path_info g_FanInputObjPath = {0};
@@ -159,6 +161,7 @@ static int PORT1_FAN_LED_RED_MASK = 0;
 static int PORT1_FAN_LED_BLUE_MASK = 0;
 static int g_fanled_speed_limit = 0;
 static int g_fanled_aux_speed_limit = 0;
+static unsigned int g_trigger_system_event = 0;
 
 
 //Fan LED I2C bus
@@ -219,16 +222,36 @@ static int i2c_open(int bus)
 	return fd;
 }
 
-static void system_shut_down(char *message) {
-	char msg[MAX_PATH_LEN] = {0};
-	if (message != NULL)
-		sprintf(msg, "[FAN_ALGORITHM][%s] trigger system shut down: %s", __FUNCTION__, message);
-	else
-		sprintf(msg, "[FAN_ALGORITHM][%s] trigger system shut down", __FUNCTION__);
-	printf("%s\n", msg);
+static void add_system_event_thermal_shutdown(sd_bus *bus, enum FAN_ALGO_TYPE fan_algo_type)
+{
+	int rc;
+	sd_bus_error bus_error = SD_BUS_ERROR_NULL;
+	sd_bus_message *response = NULL;
 
-	strncpy(g_fan_para_shm->shutdown_msg, msg, MAX_PATH_LEN);
+	if (g_trigger_system_event != 0) //even trigger thermal shutdown event
+		return ;
 
+	rc = sd_bus_call_method(bus,
+				"xyz.openbmc_project.Logging",
+				"/xyz/openbmc_project/logging/internal/manager",
+				"xyz.openbmc_project.Logging.Internal.Manager",
+				"Commit",
+				&bus_error,
+				&response,
+				"ts",
+				(unsigned long long) 0, "xyz.openbmc_project.State.Shutdown.ThermalEvent.Error.Processor");
+	if(rc < 0)
+		if (g_fan_para_shm->debug_msg_info_en == 1)
+			fprintf(stderr, "add_system_event_thermal_shutdown  ERROR: %s!!!!\n",  bus_error.message);
+	else {
+		g_trigger_system_event |= (1<<((int)fan_algo_type));
+	}
+}
+
+static void system_shut_down(sd_bus *bus, enum FAN_ALGO_TYPE fan_algo_type) {
+	add_system_event_thermal_shutdown(bus, fan_algo_type);
+	if (g_fan_para_shm->debug_msg_info_en == 1)
+		printf("system_shut_down to prepare poweroff!!!! \n");
 	system("obmcutil  poweroff");
 }
 
@@ -302,7 +325,7 @@ static int set_fanled( uint8_t port0, uint8_t port1)
 	return 0;
 }
 
-static int calculate_closeloop(struct st_closeloop_obj_data *sensor_data, double current_fanspeed)
+static int calculate_closeloop(struct st_closeloop_obj_data *sensor_data, double current_fanspeed, sd_bus *bus)
 {
 	int total_integral_error;
 	int i;
@@ -404,13 +427,23 @@ static int calculate_closeloop(struct st_closeloop_obj_data *sensor_data, double
 	if (g_Closeloopspeed < pwm_speed)
 		g_Closeloopspeed = pwm_speed;
 
-	if (sensor_data->sensor_reading>=sensor_data->warning_temp)
+	if (sensor_data->sensor_reading>=sensor_data->critical_temp) {
+		system_shut_down(bus, EM_CLOSELOOP);
 		g_Closeloopspeed = 100;
+		if (g_fan_para_shm->debug_msg_info_en == 1)
+			printf("%s, %d, upper Critical !!!! \n", __FUNCTION__, __LINE__);
+	} else if (sensor_data->sensor_reading>=sensor_data->warning_temp)
+		g_Closeloopspeed = 100;
+		if (g_fan_para_shm->debug_msg_info_en == 1)
+			printf("%s, %d, upper Warning !!!! \n", __FUNCTION__, __LINE__);
+	else {
+		g_trigger_system_event &=~(1<<((int)EM_CLOSELOOP));
+	}
 
 	return 1;
 }
 
-static int calculate_openloop (double sensorreading)
+static int calculate_openloop (double sensorreading, sd_bus *bus)
 {
 	int speed = 0;
 
@@ -422,17 +455,21 @@ static int calculate_openloop (double sensorreading)
 
 	sensorreading=sensorreading+g_fan_para_shm->openloop_sensor_offset;
 
-	if (sensorreading > g_Openloop_Critical_Upper) {
-		char msg[100] = {0};
-		sprintf(msg, "%s : sensorreading=%f, g_Openloop_Critical_Upper:%d", __FUNCTION__, sensorreading, g_Openloop_Critical_Upper);
-		system_shut_down(msg);
-		g_Openloopspeed = 100; // as openloop reading > warning upper, then Fan Speed 100%
-		return 1;
-	} else if (sensorreading > g_Openloop_Warning_Upper) {
+	if (sensorreading > (double)g_Openloop_Critical_Upper) {
+		system_shut_down(bus, EM_OPENLOOP);
 		g_Openloopspeed = 100; // as openloop reading > warning upper, then Fan Speed 100%
 		g_fan_para_shm->openloop_speed = 100;
+		if (g_fan_para_shm->debug_msg_info_en == 1)
+			printf("%s, %d, upper Critical !!!! \n", __FUNCTION__, __LINE__);
+		return 1;
+	} else if (sensorreading > (double) g_Openloop_Warning_Upper) {
+		g_Openloopspeed = 100; // as openloop reading > warning upper, then Fan Speed 100%
+		g_fan_para_shm->openloop_speed = 100;
+		if (g_fan_para_shm->debug_msg_info_en == 1)
+			printf("%s, %d, upper Warning !!!! \n", __FUNCTION__, __LINE__);
 		return 1;
 	}
+	g_trigger_system_event &=~(1<<((int)EM_OPENLOOP));
 
 	if (sensorreading > g_UpAmb) {
 		speed = g_HighSpeed;
@@ -726,7 +763,6 @@ static int fan_control_algorithm_monitor(void)
 	int current_fanspeed = 0;
 	int first_time_set = 0;
 	char *ptr_temp_fan_bus = NULL, *ptr_temp_fan_intf= NULL;
-	int prev_power_status = -1;
 
 	double real_fanspeed = 0.0;
 	do {
@@ -764,14 +800,6 @@ static int fan_control_algorithm_monitor(void)
 		response = sd_bus_message_unref(response);
 
 		g_fan_para_shm->current_power_state = Power_state;
-		if (prev_power_status < 0)
-			prev_power_status = Power_state;
-
-		if (prev_power_status != Power_state) {
-			if (Power_state == 1)
-				g_fan_para_shm->shutdown_msg[0] = 0; //clear shudown message
-			prev_power_status = Power_state;
-		}
 
 		current_fanspeed = 0;
 		for(i=0; i<g_FanSpeedObjPath.size; i++) {
@@ -822,7 +850,7 @@ static int fan_control_algorithm_monitor(void)
 					t_closeloop_data->sensor_reading = t_closeloop_data->sensor_reading / 1000;
 				g_fan_para_shm->closeloop_param[t_closeloop_data->index].closeloop_sensor_reading = t_closeloop_data->sensor_reading;
 				check_change_closeloop_params(t_closeloop_data);
-				calculate_closeloop(t_closeloop_data, real_fanspeed);
+				calculate_closeloop(t_closeloop_data, real_fanspeed, bus);
 				closeloop_reading = (closeloop_reading<t_closeloop_data->sensor_reading)? t_closeloop_data->sensor_reading:closeloop_reading;
 			}
 			t_header = t_header->next;
@@ -882,7 +910,7 @@ static int fan_control_algorithm_monitor(void)
 			t_reading = (double) get_max_sensor_reading_with_bus(bus, t_header);
 			t_reading = t_reading>=0? (double) t_reading/1000 : t_reading;
 			g_fan_para_shm->openloop_sensor_reading = t_reading;
-			calculate_openloop(t_reading);
+			calculate_openloop(t_reading, bus);
 			openloop_reading = (openloop_reading<t_reading? t_reading:openloop_reading);
 			t_header = t_header->next;
 		}
@@ -1223,6 +1251,7 @@ static int initial_fan_config(sd_bus *bus)
 			t_closeloop_data->Kd = (double)atof(response_data[2]);
 			t_closeloop_data->sensor_tracking = atoi(response_data[3]);
 			t_closeloop_data->warning_temp = atoi(response_data[4]);
+			t_closeloop_data->critical_temp = atoi(response_data[5]);
 
 			g_fan_para_shm->closeloop_param[index].Kp = t_closeloop_data->Kp;
 			g_fan_para_shm->closeloop_param[index].Ki = t_closeloop_data->Ki;
@@ -1372,7 +1401,6 @@ static void inital_fan_pid_shm()
 		g_fan_para_shm->current_power_state = -1;
 		g_fan_para_shm->openloop_warning_upper = MAX_SENSOR_READING;
 		g_fan_para_shm->openloop_critical_upper = MAX_SENSOR_READING;
-		g_fan_para_shm->shutdown_msg[0] = 0;
 	}
 }
 

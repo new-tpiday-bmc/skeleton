@@ -36,6 +36,7 @@ struct st_fan_closeloop_par {
 	int groups_sensor_reading[MAX_CLOSELOOP_SENSOR_NUM];
 };
 
+
 struct st_fan_parameter {
 	int flag_closeloop; //0: init ; 1:do nothing ; 2: changed; 3:lock waiting
 	int closeloop_count;
@@ -54,7 +55,6 @@ struct st_fan_parameter {
 	int openloop_sensor_offset;
 	int openloop_warning_upper;
 	int openloop_critical_upper;
-	char shutdown_msg[MAX_PATH_LEN];
 
 	int current_speed;
 	int max_fanspeed;
@@ -317,11 +317,6 @@ main(int argc, char * const argv[])
 		       g_fan_para_shm->g_ParamA, g_fan_para_shm->g_ParamB, g_fan_para_shm->g_ParamC,
 		       g_fan_para_shm->g_LowAmb, g_fan_para_shm->g_UpAmb,  g_fan_para_shm->g_LowSpeed, g_fan_para_shm->g_HighSpeed,
 		       g_fan_para_shm->openloop_speed, g_fan_para_shm->openloop_warning_upper, g_fan_para_shm->openloop_critical_upper);
-
-		if (strlen(g_fan_para_shm->shutdown_msg) > 0) {
-			print_datetime();
-			printf("Openloop Info, trigger shutdown message:%s\n", g_fan_para_shm->shutdown_msg);
-		}
 
 		print_datetime();
 		printf("PWM Info, current fan speed,%d (%d~%d)\n",
