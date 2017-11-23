@@ -193,6 +193,17 @@ class SystemManager(DbusProperties, DbusObjectManager):
                 return s_params
 
             for i in range(len(System.FAN_ALGORITHM_CONFIG[key])):
+                if System.FAN_ALGORITHM_CONFIG[key][i].find("Sensor_Group_List") >= 0:
+                    sensor_path_format = System.FAN_ALGORITHM_CONFIG[key][i+1]
+                    sensor_amount_range = System.FAN_ALGORITHM_CONFIG[key][i+2]
+                    start_idx = sensor_amount_range[0]
+                    end_idx = sensor_amount_range[1]
+                    while start_idx<=end_idx:
+                        sensor_path = sensor_path_format % start_idx
+                        s_params+=sensor_path + ";"
+                        start_idx+=1
+                    i+=2
+                    continue
                 s_params+=System.FAN_ALGORITHM_CONFIG[key][i] + ";"
         except:
             return ""

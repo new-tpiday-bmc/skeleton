@@ -434,6 +434,8 @@ FAN_ALGORITHM_CONFIG = {
         'EXT_FAN_INPUT_OBJ' : ['xyz.openbmc_project.Hwmon.hwmon3', 'xyz.openbmc_project.Sensor.Value'],
         'EXT_FAN_OUTPUT_OBJ' : ['xyz.openbmc_project.Hwmon.hwmon3', 'xyz.openbmc_project.Sensor.Value'],
         'OPEN_LOOP_GROUPS_1' :  ['xyz.openbmc_project.Hwmon.hwmon0', 'xyz.openbmc_project.Sensor.Value'],
+        'CLOSE_LOOP_GROUPS_1' :  ['xyz.openbmc_project.Hwmon.hwmon5', 'xyz.openbmc_project.Sensor.Value'],
+        'CLOSE_LOOP_GROUPS_2' :  ['xyz.openbmc_project.Hwmon.hwmon5', 'xyz.openbmc_project.Sensor.Value'],
     },
 
     'CHASSIS_POWER_STATE': ['/org/openbmc/control/chassis0'],
@@ -486,10 +488,37 @@ FAN_ALGORITHM_CONFIG = {
     'OPEN_LOOP_GROUPS_1':
         [
             "/xyz/openbmc_project/sensors/temperature/ambient_mb",
-            #Thermal team only watch temp4 ambinet
         ],
-    'CLOSE_LOOP_PARAM_1' :[],
-    'CLOSE_LOOP_GROUPS_1':[],
+#Close Loop Profile#1: CPU thermal
+    'CLOSE_LOOP_PARAM_1' :
+        [
+            '0.45',
+            '-0.017',
+            '0.3',
+            '80',
+            '85',
+        ],
+    'CLOSE_LOOP_GROUPS_1':
+        [
+            "Sensor_Group_List", #notify following 2 element, show path format and amount range
+            "/xyz/openbmc_project/sensors/temperature/p0_core%d_temp", [0, 23],
+            "Sensor_Group_List", #notify following 2 element, show path format and amount range
+            "/xyz/openbmc_project/sensors/temperature/p1_core%d_temp", [0, 23],
+        ],
+#Close Loop Profile#2: DIMM thermal
+    'CLOSE_LOOP_PARAM_2' :
+        [
+            '0.45',
+            '-0.017',
+            '0.3',
+            '80',
+            '85',
+        ],
+    'CLOSE_LOOP_GROUPS_2':
+        [
+            "Sensor_Group_List", #notify following 2 element, show path format and amount range
+            "/xyz/openbmc_project/sensors/temperature/dimm%d_temp", [0, 31],
+        ],
 
     'FAN_LED_OFF': ["0xFF"],
     'FAN_LED_PORT0_ALL_BLUE': ["0xAA"],
