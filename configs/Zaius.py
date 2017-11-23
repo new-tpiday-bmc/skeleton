@@ -434,8 +434,10 @@ FAN_ALGORITHM_CONFIG = {
         'EXT_FAN_INPUT_OBJ' : ['xyz.openbmc_project.Hwmon.hwmon3', 'xyz.openbmc_project.Sensor.Value'],
         'EXT_FAN_OUTPUT_OBJ' : ['xyz.openbmc_project.Hwmon.hwmon3', 'xyz.openbmc_project.Sensor.Value'],
         'OPEN_LOOP_GROUPS_1' :  ['xyz.openbmc_project.Hwmon.hwmon0', 'xyz.openbmc_project.Sensor.Value'],
-        'CLOSE_LOOP_GROUPS_1' :  ['xyz.openbmc_project.Hwmon.hwmon5', 'xyz.openbmc_project.Sensor.Value'],
-        'CLOSE_LOOP_GROUPS_2' :  ['xyz.openbmc_project.Hwmon.hwmon5', 'xyz.openbmc_project.Sensor.Value'],
+        'CLOSE_LOOP_GROUPS_1' :  ['occ-hwmon/occ1-dev0', 'xyz.openbmc_project.Sensor.Value'],
+        'EXT_CLOSE_LOOP_GROUPS_1' :  ['occ-hwmon/occ2-dev0', 'xyz.openbmc_project.Sensor.Value'],
+        'CLOSE_LOOP_GROUPS_2' :  ['occ-hwmon/occ1-dev0', 'xyz.openbmc_project.Sensor.Value'],
+        'EXT_CLOSE_LOOP_GROUPS_2' :  ['occ-hwmon/occ2-dev0', 'xyz.openbmc_project.Sensor.Value'],
     },
 
     'CHASSIS_POWER_STATE': ['/org/openbmc/control/chassis0'],

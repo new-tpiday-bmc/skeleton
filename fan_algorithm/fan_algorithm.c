@@ -17,7 +17,7 @@
 #define I2C_M_RECV_LEN          0x0400  /* length will be first received byte */
 
 #define MAX_PATH_LEN 200
-#define MAX_SENSOR_NUM 40
+#define MAX_SENSOR_NUM 50
 #define SAMPLING_N  20
 
 #define CMD_OUTPUT_PORT_0 2
@@ -52,6 +52,7 @@ struct st_fan_obj_path_info {
 	char ext_service_inf[MAX_PATH_LEN];
 	char path[MAX_SENSOR_NUM][MAX_PATH_LEN];
 	int  sensor_number_list[MAX_SENSOR_NUM];
+	int  sensor_exist[MAX_SENSOR_NUM];
 	int size_sensor_list;
 	int size;
 	void *obj_data;
@@ -171,6 +172,8 @@ static double g_Closeloopspeed = 0;
 static unsigned int closeloop_first_time = 0;
 
 static int initial_fan_config(sd_bus *bus);
+static int get_dbus_hwmon_mapping_parameters(sd_bus *bus , char *request_param , char *reponse_data);
+
 
 static int push_fan_obj(struct st_fan_obj_path_info **header, struct st_fan_obj_path_info *item)
 {
@@ -472,7 +475,8 @@ static int get_sensor_reading(sd_bus *bus, char *obj_path, int *sensor_reading, 
 				NULL);
 
 	if(rc < 0) {
-		fprintf(stderr, "obj_path: %s Failed to get temperature from dbus: %s\n", obj_path, bus_error.message);
+		if (g_fan_para_shm->debug_msg_info_en == 1)
+			fprintf(stderr, "obj_path: %s Failed to get temperature from dbus: %s\n", obj_path, bus_error.message);
 	} else {
 		rc = sd_bus_message_read(response,"v", "i", sensor_reading);
 		if (rc < 0)
@@ -490,14 +494,21 @@ static int get_sensor_reading_with_bus(sd_bus *bus, char *obj_path, int *sensor_
 	sd_bus_error bus_error = SD_BUS_ERROR_NULL;
 	sd_bus_message *response = NULL;
 	int rc;
+	char *ptr_service_bus;
+	char temp_service_bus[100];
+	int flag_error = 0;
 
 	*sensor_reading = 0;
 
-	if (service_bus == NULL || service_inf == NULL || strlen(service_bus) <= 0 || strlen(service_inf) <= 0 || strlen(obj_path) <= 0)
+
+	ptr_service_bus = service_bus;
+retry_sensor_reading_with_bus:
+
+	if (ptr_service_bus == NULL || service_inf == NULL || strlen(ptr_service_bus) <= 0 || strlen(service_inf) <= 0 || strlen(obj_path) <= 0)
 		return -1;
 
 	rc = sd_bus_call_method(bus,
-				service_bus,
+				ptr_service_bus,
 				obj_path,
 				"org.freedesktop.DBus.Properties",
 				"Get",
@@ -507,7 +518,19 @@ static int get_sensor_reading_with_bus(sd_bus *bus, char *obj_path, int *sensor_
 				service_inf, "Value");
 	
 	if(rc < 0) {
-		fprintf(stderr, "obj_path: %s Failed to get temperature from dbus: %s\n", obj_path, bus_error.message);
+		if (g_fan_para_shm->debug_msg_info_en == 1)
+			fprintf(stderr, "obj_path: %s Failed to get temperature from dbus: %s, busname:%s\n", obj_path, bus_error.message, ptr_service_bus);
+		if (flag_error==0 && get_dbus_hwmon_mapping_parameters(bus, ptr_service_bus, temp_service_bus) >= 0) {
+			ptr_service_bus = temp_service_bus;
+			if (strcmp(fan_obj->service_bus, service_bus) == 0)
+				strcpy(fan_obj->service_bus, temp_service_bus);
+			else
+				strcpy(fan_obj->ext_service_bus, temp_service_bus);
+			bus_error = SD_BUS_ERROR_NULL;
+			response = NULL;
+			flag_error =1;
+			goto retry_sensor_reading_with_bus;
+		}
 	} else {
 		rc = sd_bus_message_read(response,"v", "x", sensor_reading);
 		if (rc < 0)
@@ -528,9 +551,29 @@ static int get_max_sensor_reading_with_bus(sd_bus *bus, struct st_fan_obj_path_i
 	int max_value = 0;
 
 	for(i=0; i<fan_obj->size; i++) {
-		rc = get_sensor_reading_with_bus(bus, fan_obj->path[i], &sensor_reading, fan_obj, fan_obj->service_bus, fan_obj->service_inf);
+		if (fan_obj->sensor_exist[i] == 1)
+			continue;
+		rc = -1;
+		if (fan_obj->sensor_exist[i] ==2 || fan_obj->sensor_exist[i] == 0) {
+			rc = get_sensor_reading_with_bus(bus, fan_obj->path[i], &sensor_reading, fan_obj, fan_obj->service_bus, fan_obj->service_inf);
+			if (rc >= 0)
+				fan_obj->sensor_exist[i] = 2;
+		}
+		if (fan_obj->sensor_exist[i] ==3 || fan_obj->sensor_exist[i] == 0) {
+			if (rc < 0 && strlen(fan_obj->ext_service_bus)>0 && strlen(fan_obj->ext_service_inf)>0) {
+				rc = get_sensor_reading_with_bus(bus, fan_obj->path[i], &sensor_reading, fan_obj, fan_obj->ext_service_bus, fan_obj->ext_service_inf);
+				if (rc >=0)
+					fan_obj->sensor_exist[i] = 3;
+			}
+		}
 		if (rc >= 0)
 			max_value = (max_value < sensor_reading)? sensor_reading : max_value;
+		else {
+			if (strlen(fan_obj->service_bus)>0 && strlen(fan_obj->ext_service_bus)>0 && fan_obj->sensor_exist[i]==0) {
+				if(strncmp(fan_obj->service_bus, "occ-hwmon", strlen("occ-hwmon")) != 0 && strncmp(fan_obj->ext_service_bus, "occ-hwmon", strlen("occ-hwmon")) != 0)
+					fan_obj->sensor_exist[i] = 1;
+			}
+		}
 	}
 
 	return max_value;
@@ -775,6 +818,8 @@ static int fan_control_algorithm_monitor(void)
 
 			if (t_closeloop_data != NULL) {
 				t_closeloop_data->sensor_reading = get_max_sensor_reading_with_bus(bus, t_header);
+				if (t_closeloop_data->sensor_reading >= 0)
+					t_closeloop_data->sensor_reading = t_closeloop_data->sensor_reading / 1000;
 				g_fan_para_shm->closeloop_param[t_closeloop_data->index].closeloop_sensor_reading = t_closeloop_data->sensor_reading;
 				check_change_closeloop_params(t_closeloop_data);
 				calculate_closeloop(t_closeloop_data, real_fanspeed);
@@ -1015,6 +1060,43 @@ static int get_dbus_fan_parameters(sd_bus *bus , char *request_param , int *resp
 	return rc;
 }
 
+
+static int get_dbus_hwmon_mapping_parameters(sd_bus *bus , char *request_param , char *reponse_data)
+{
+	sd_bus_error bus_error = SD_BUS_ERROR_NULL;
+	sd_bus_message *response = NULL;
+	int rc = 0;
+	const char*  response_param;
+
+	if (reponse_data == NULL)
+		return -1;
+
+	reponse_data[0] = 0;
+	rc = sd_bus_call_method(bus,
+				"org.openbmc.managers.System",
+				"/org/openbmc/managers/System",
+				"org.openbmc.managers.System",
+				"getHwmonMappingParams",
+				&bus_error,
+				&response,
+				"s", request_param);
+	if(rc < 0) {
+		printf("%s, %d response message:[%s]\n", __FUNCTION__, __LINE__, strerror(-rc));
+	} else {
+		rc = sd_bus_message_read(response, "s", &response_param);
+		if (rc < 0 ) {
+			fprintf(stderr, "Failed to parse response message:[%s]\n", strerror(-rc));
+			return rc;
+		}
+		strcpy(reponse_data, response_param);
+		if (strcmp(reponse_data, request_param) ==0)
+			return -1;
+	}
+	sd_bus_error_free(&bus_error);
+	response = sd_bus_message_unref(response);
+	return rc;
+}
+
 static int initial_fan_config(sd_bus *bus)
 {
 	int response_len = 0;
@@ -1035,6 +1117,8 @@ static int initial_fan_config(sd_bus *bus)
 		strcpy(g_FanInputObjPath.service_inf , response_data[1]);
 	}
 	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#EXT_FAN_INPUT_OBJ", &response_len, response_data);
+	g_FanInputObjPath.ext_service_bus[0] = 0;
+	g_FanInputObjPath.ext_service_inf[0] = 0;
 	if (response_len == 2) {
 		strcpy(g_FanInputObjPath.ext_service_bus , response_data[0]);
 		strcpy(g_FanInputObjPath.ext_service_inf , response_data[1]);
@@ -1051,6 +1135,8 @@ static int initial_fan_config(sd_bus *bus)
 		strcpy(g_FanSpeedObjPath.service_inf , response_data[1]);
 	}
 	get_dbus_fan_parameters(bus, "FAN_DBUS_INTF_LOOKUP#EXT_FAN_OUTPUT_OBJ", &response_len, response_data);
+	g_FanSpeedObjPath.ext_service_bus[0] = 0;
+	g_FanSpeedObjPath.ext_service_inf[0] = 0;
 	if (response_len == 2) {
 		strcpy(g_FanSpeedObjPath.ext_service_bus , response_data[0]);
 		strcpy(g_FanSpeedObjPath.ext_service_inf , response_data[1]);
@@ -1116,6 +1202,16 @@ static int initial_fan_config(sd_bus *bus)
 		}
 
 		prefix_closeloop[0] = 0;
+		sprintf(prefix_closeloop, "FAN_DBUS_INTF_LOOKUP#EXT_CLOSE_LOOP_GROUPS_%d", obj_count);
+		get_dbus_fan_parameters(bus, prefix_closeloop, &reponse_len, reponse_data);
+		t_fan_obj->ext_service_bus[0] = 0;
+		t_fan_obj->ext_service_inf[0] = 0;
+		if (reponse_len == 2) {
+			strcpy(t_fan_obj->ext_service_bus , reponse_data[0]);
+			strcpy(t_fan_obj->ext_service_inf , reponse_data[1]);
+		}
+
+		prefix_closeloop[0] = 0;
 		sprintf(prefix_closeloop, "CLOSE_LOOP_PARAM_%d", obj_count);
 		get_dbus_fan_parameters(bus, prefix_closeloop, &response_len, response_data);
 		if (response_len > 0) {
@@ -1168,6 +1264,8 @@ static int initial_fan_config(sd_bus *bus)
 		prefix_openloop[0] = 0;
 		sprintf(prefix_openloop, "FAN_DBUS_INTF_LOOKUP#OPEN_LOOP_GROUPS_%d", obj_count);
 		get_dbus_fan_parameters(bus, prefix_openloop, &response_len, response_data);
+		t_fan_obj->ext_service_bus[0] = 0;
+		t_fan_obj->ext_service_inf[0] = 0;
 		if (response_len == 2) {
 			strcpy(t_fan_obj->service_bus , response_data[0]);
 			strcpy(t_fan_obj->service_inf , response_data[1]);

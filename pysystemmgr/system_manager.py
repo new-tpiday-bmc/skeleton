@@ -157,6 +157,19 @@ class SystemManager(DbusProperties, DbusObjectManager):
 
     @dbus.service.method(DBUS_NAME,
         in_signature='s', out_signature='s')
+    def getHwmonMappingParams(self, hwmon_dev):
+        if hwmon_dev.find("occ-hwmon")>=0:
+            hwmon_root_dev_path="/sys/bus/platform/drivers/"
+            hwmon_root_dev_path+=hwmon_dev
+            hwmon_root_dev_path+="/hwmon"
+            for i in range(20):
+                hwmon_dev_path = hwmon_root_dev_path + "/hwmon%d"%i
+                if os.path.isdir(hwmon_dev_path):
+                    return "xyz.openbmc_project.Hwmon.hwmon%d"%i
+        return hwmon_dev
+
+    @dbus.service.method(DBUS_NAME,
+        in_signature='s', out_signature='s')
     def getFanControlParams(self, key):
         if ('FAN_ALGORITHM_CONFIG' not in dir(System) or key == None):
             return ""
@@ -192,7 +205,8 @@ class SystemManager(DbusProperties, DbusObjectManager):
                     s_params += hwmon_path + ";"
                 return s_params
 
-            for i in range(len(System.FAN_ALGORITHM_CONFIG[key])):
+            i = 0
+            while i<len(System.FAN_ALGORITHM_CONFIG[key]):
                 if System.FAN_ALGORITHM_CONFIG[key][i].find("Sensor_Group_List") >= 0:
                     sensor_path_format = System.FAN_ALGORITHM_CONFIG[key][i+1]
                     sensor_amount_range = System.FAN_ALGORITHM_CONFIG[key][i+2]
@@ -202,9 +216,10 @@ class SystemManager(DbusProperties, DbusObjectManager):
                         sensor_path = sensor_path_format % start_idx
                         s_params+=sensor_path + ";"
                         start_idx+=1
-                    i+=2
+                    i+=3
                     continue
                 s_params+=System.FAN_ALGORITHM_CONFIG[key][i] + ";"
+                i+=1
         except:
             return ""
         return s_params
