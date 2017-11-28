@@ -12,6 +12,7 @@ import obmc_system_config as System
 import obmc.mapper.utils
 import obmc.inventory
 import obmc.system
+import subprocess
 
 DBUS_NAME = 'org.openbmc.managers.System'
 OBJ_NAME = '/org/openbmc/managers/System'
@@ -73,6 +74,14 @@ class SystemManager(DbusProperties, DbusObjectManager):
                 self.bus, waitlist,
                 callback=self.gotoNextState)
 
+    def setGpioD5Blind(self):
+        # turn off the LED once BMC states in READY
+        BASE_GPIO_D = 24
+        cmd_data = subprocess.check_output("devmem 0x1e780000", shell=True).rstrip("\n")
+        value = int(cmd_data, 16)
+        value = value | (1<<(5+BASE_GPIO_D))
+        os.system("devmem 0x1e780000 32 " + hex(value)[:-1])
+
     def gotoNextState(self):
         s = 0
         current_state = self.Get(DBUS_NAME, "current_state")
@@ -85,6 +94,8 @@ class SystemManager(DbusProperties, DbusObjectManager):
         else:
             new_state_name = System.SYSTEM_STATES[s]
             print "SystemManager Goto System State: "+new_state_name
+            if new_state_name == "BMC_READY":
+                self.setGpioD5Blind()
             self.SystemStateHandler(new_state_name)
 
     def import_system_state_from_disk(self):
