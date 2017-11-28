@@ -59,11 +59,6 @@ class ChassisControlObject(DbusProperties, DbusObjectManager):
                 'object_name': '/org/freedesktop/systemd1',
                 'interface_name': 'org.freedesktop.systemd1.Manager'
             },
-            'host_state': {
-                'bus_name': 'xyz.openbmc_project.State.Host',
-                'object_name': '/xyz/openbmc_project/state/host0',
-                'interface_name': 'org.freedesktop.DBus.Properties'
-            },
         }
 
         # uuid
@@ -100,22 +95,18 @@ class ChassisControlObject(DbusProperties, DbusObjectManager):
     def powerOn(self):
         print "Turn on power and boot"
         self.Set(DBUS_NAME, "reboot", 0)
-
-        o = self.dbus_objects['host_state']
-        obj = bus.get_object(o['bus_name'], o['object_name'])
-        intf = dbus.Interface(obj, o['interface_name'])
-        intf.Set("xyz.openbmc_project.State.Host", "RequestedHostTransition", "xyz.openbmc_project.State.Host.Transition.On")
+        intf = self.getInterface('systemd')
+        f = getattr(intf, 'StartUnit')
+        f.call_async('obmc-host-start@0.target', 'replace')
         return None
 
     @dbus.service.method(DBUS_NAME,
                          in_signature='', out_signature='')
     def powerOff(self):
         print "Turn off power"
-
-        o = self.dbus_objects['host_state']
-        obj = bus.get_object(o['bus_name'], o['object_name'])
-        intf = dbus.Interface(obj, o['interface_name'])
-        intf.Set("xyz.openbmc_project.State.Host", "RequestedHostTransition", "xyz.openbmc_project.State.Host.Transition.Off")
+        intf = self.getInterface('systemd')
+        f = getattr(intf, 'StartUnit')
+        f.call_async('obmc-chassis-hard-poweroff@0.target', 'replace')
         return None
 
     @dbus.service.method(DBUS_NAME,
