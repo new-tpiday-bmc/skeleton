@@ -478,8 +478,8 @@ FAN_ALGORITHM_CONFIG = {
     'OPEN_LOOP_PARAM':
         [
             '0.23',
-            '-11.99',
-            '189.86',
+            '-12',
+            '190',
             '24',
             '44',
             '32',
@@ -494,9 +494,9 @@ FAN_ALGORITHM_CONFIG = {
 #Close Loop Profile#1: CPU thermal
     'CLOSE_LOOP_PARAM_1' :
         [
-            '0.45',
-            '-0.017',
-            '0.3',
+            '0.16',
+            '-0.004',
+            '0.31',
             '80',
             '85',
             '90',
@@ -511,9 +511,9 @@ FAN_ALGORITHM_CONFIG = {
 #Close Loop Profile#2: DIMM thermal
     'CLOSE_LOOP_PARAM_2' :
         [
-            '0.45',
-            '-0.017',
-            '0.3',
+            '0.16',
+            '-0.004',
+            '0.1',
             '80',
             '85',
             '90',
