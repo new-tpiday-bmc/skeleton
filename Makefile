@@ -19,9 +19,7 @@ SUBDIRS = fanctl \
 	  pysensormgr \
 	  pystatemgr \
 	  pysystemmgr \
-	  pytools \
-	  fan_algorithm \
-	  fan_tool
+	  pytools 
 
 REVERSE_SUBDIRS = $(shell echo $(SUBDIRS) $(GDBUS_APPS) | tr ' ' '\n' | tac |tr '\n' ' ')
 
