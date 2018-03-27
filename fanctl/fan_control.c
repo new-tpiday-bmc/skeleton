@@ -194,7 +194,7 @@ static int fan_set_max_speed(fan_info_t *info)
 	if (!info)
 		return -1;
 	for (i = 0; i < info->fan_num; i++) {
-		rc = fan_set_speed(info->bus, i, 255);
+		rc = fan_set_speed(info->bus, i, 10);
 		if (rc < 0)
 			break;
 		fprintf(stderr, "fanctl: Set fan%d to max speed\n", i);
